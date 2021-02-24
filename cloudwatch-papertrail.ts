@@ -38,10 +38,22 @@ interface LogData {
   logEvents: LogMessage[]
 }
 
+interface IHash {
+  [details: string] : string;
+}
+
 function getEnvVarOrFail(varName: string): string {
   const value = process.env[varName]
   if (!value) {
     throw new Error(`Required environment variable ${varName} is undefined`)
+  }
+  return value
+}
+
+function getEnvVarOrDefault(varName: string, defValue: string): string {
+  const value = process.env[varName]
+  if (!value) {
+    return defValue
   }
   return value
 }
@@ -53,6 +65,9 @@ function getEnvVarOrFail(varName: string): string {
 // Another sequence of non-tabs followed by a tab
 // Capture a group of alphanumeric chars leading up to a ':'
 const logLevelRegex = /^[^\t]+\t[^\t]+\t(\w+):/
+// default Rails Sematic Logger format
+// <space><firs letter of level><space>
+const logLevelRegexRails = /\s([DIWEF])\s\[/
 
 export function parseLogLevel(tsvMessage: string): string | null {
   // Messages logged manually are tab separated value strings of three columns:
@@ -61,10 +76,32 @@ export function parseLogLevel(tsvMessage: string): string | null {
   return match && match[1].toLowerCase()
 }
 
+export function parseLogLevelRails(tsvMessage: string): string | null {
+  // Messages logged manually are tab separated value strings of three columns:
+  // date string (ISO8601), request ID, log message
+  const match = logLevelRegexRails.exec(tsvMessage)
+
+  // see https://github.com/winstonjs/winston#logging-levels
+  const mapping : IHash = {"D": 'debug','I': 'info', 'W': 'warn', 'E': 'error', 'F': 'crit' };
+
+  if(match) {
+    return mapping[match[1].toString()]
+  }
+  return null
+}
+
+function parseTypedLogLevel(type: string, tsvMessage: string): string | null {
+  if(type == 'RAILS') {
+    return parseLogLevelRails(tsvMessage)
+  }
+  return parseLogLevel(tsvMessage)
+}
+
 export const handler: AwsLambda.Handler = (event: CloudwatchLogGroupsEvent, context, callback) => {
   const host = getEnvVarOrFail('PAPERTRAIL_HOST')
   const port = getEnvVarOrFail('PAPERTRAIL_PORT')
   const shouldParseLogLevels = getEnvVarOrFail('PARSE_LOG_LEVELS') === "true"
+  const logLevelFormat = getEnvVarOrDefault('LOG_FORMAT','WINSTON')
   const payload = new Buffer(event.awslogs.data, 'base64');
 
   unarchiveLogData(payload)
@@ -81,13 +118,26 @@ export const handler: AwsLambda.Handler = (event: CloudwatchLogGroupsEvent, cont
         colorize: true,
       })
 
+
       const logger = new (winston.Logger)({
+        ...(logLevelFormat === 'RAILS' ? {levels: {
+                                                    debug: 7,
+                                                    info: 6,
+                                                    notice: 5,
+                                                    warning: 4,
+                                                    warn: 4,
+                                                    error: 3,
+                                                    err: 3,
+                                                    crit: 2,
+                                                    alert: 1,
+                                                    emerg: 0,
+                                                  },} : {}),
         transports: [papertrailTransport]
       });
 
       logData.logEvents.forEach(function (event) {
         const logLevel = shouldParseLogLevels
-          ? parseLogLevel(event.message) || 'info'
+          ? parseTypedLogLevel(logLevelFormat, event.message) || 'info'
           : 'info'
         logger.log(logLevel, event.message);
       });
